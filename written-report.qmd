@@ -1,0 +1,1158 @@
+---
+title: "Explaining Factors Contributing to Total Compensation for San Francisco City Employees"
+author: "The Outliers: Suhas Kurapati, Matias Pinto Chavez, Mason Wu, Kelly Xu"
+date: "December 12, 2024"
+bibliography: references.bib
+format: pdf
+
+execute:
+  warning: false
+  message: false
+  echo: false
+editor: visual
+---
+
+```{r set-up, include = TRUE}
+knitr::opts_chunk$set(echo = FALSE,
+                      warning = FALSE,
+                      message = FALSE,
+                      fig.align = "center",
+                      fig.height = 2.25)
+```
+
+```{r, echo = FALSE}
+#| label: load packages and data
+library(tidyverse)
+library(tidymodels)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(patchwork)
+library(GGally)
+library(rms)
+library(ggtext)
+library(patchwork)
+library(kableExtra)
+ 
+employee_comp <- read.csv("data/Employee_Compensation.csv")
+```
+
+## Introduction
+
+San Francisco is the United States city with the highest median household income. However, some have raised questions on whether San Francisco employees are overcompensated, with claims of excessive benefits and questionable overtime practices. A 2021 Forbes article highlighted this issue, noting that “one deputy sheriff in San Francisco earned \$574,595 last year, which included \$315,896 in overtime” [@andzejewski2021].
+
+With the rising scrutiny over high compensation figures, our model aims to provide insight into the impacts of different factors on Total Compensation in San Francisco, to 1) support decisions about budget allocations, overtime policies, and resource management to ensure fair and sustainable compensation practices, and 2) to help job seekers make informed decisions about employment opportunities and better assess their potential earnings.
+
+**Research Question**
+
+What factors significantly influence total compensation for San Francisco public sector employees, and in what ways do they affect it?
+
+### Data
+
+Our dataset contains salary and benefits data for City employees from fiscal year 2013 to the present, and is sourced from DataSF. [@employee_comp_dataset]. The data is collected by the San Francisco Controller's Office, and is added on a bi-annual basis when available for each fiscal and calendar year. Each row in the dataset contains information about an employee and their work compensation, with columns such as total compensation, normal salary, overtime salary, hours worked, health and dental benefits, and more.
+
+\newpage
+
+**Key Variables**
+
+Our response variable is `Total.Compensation`.
+
+```{r}
+variable_table <- data.frame(
+  Variable_Name = c("Total.Compensation", "Salaries", "Hours", "Employment.Type", "Overtime.Status", "Retirement"),
+  Description = c(
+    "The sum of all benefits & salaries paid to an employee, in thousands of USD.",
+    "Normal salaries paid to the employee (not including overtime pay, bonuses, etc.) in thousands of USD.",
+    "The number of hours worked by the employee, in tens of hours.",
+    "Indicator for employment type: Permanent (ongoing) or NonPermanent (fixed-term/temporary).",
+    "3 levels: NotEligible, Overtime (Eligible for overtime pay, and received >0 USD in overtime pay), and NoOvertime (eligible for overtime pay but did not receive overtime pay).",
+    "Indicator for whether an employee receives retirement benefits. 2 levels, Benefits and No Benefits"
+  ),
+  Datatype = c("Number", "Number", "Number", "Text", "Text", "Text"),
+  stringsAsFactors = FALSE
+)
+
+# View the table
+kable(variable_table, format = "latex") %>%
+  kable_styling(latex_options = c("hold_position", "scale_down"), full_width = FALSE) %>%
+  column_spec(1, width = "10em") %>%
+  column_spec(2, width = "30em") %>%
+  column_spec(3, width = "4em")
+```
+
+**Data Considerations**
+
+The dataset originally contained employee names, which we replaced with numerical IDs to ensure anonymity. We filtered out observations containing negative dollar amounts for `Total.Compensation` and/or `Salaries`, which represented retroactive adjustments to correct previous mistakes/overpayments. We then filtered out observations with zero-dollar amounts for `Total.Compensation` and/or `Salaries`, as these occur when employees receive one-time payouts or in similar special circumstances. Finally, we removed observations with repeat employee IDs to maintain independence among the observations. Situations like this represented individuals who changed roles or departments within the year. These transitions could indicate career mobility or temporary assignments, and removing these employees could potentially introduce a small bias.
+
+However, we determined that filtering these extreme observations out likely would not affect the power of our model. Within the context of our dataset, all of the data filtering only removed 494 observations from an initial 13,554 observations–an amount unlikely to affect the model's ability to generalize well.
+
+```{r, echo=FALSE}
+#Data Processing: Deleting negative values
+employee_comp <- employee_comp %>%
+  filter(
+    Salaries > 0, #less than or equal to 0 amounts represent one time payouts/scenarios that aren't usual
+    Hours > 0, #working 0 hours and still being paid would represent an unusual scenario
+    Retirement >= 0,
+    Total.Salary >= 0,
+    Total.Compensation >= 0,
+    Overtime >= 0,
+    Other.Salaries >= 0,
+    Health.and.Dental >= 0,
+    Other.Benefits >= 0,
+    Total.Benefits >= 0
+  )
+ 
+# transform columns in dollars by 1000
+# transform Hours by 10
+employee_comp <- employee_comp |>
+  mutate(
+    Salaries = Salaries / 1000,
+    Retirement = Retirement / 1000,
+    Health.and.Dental = Health.and.Dental / 1000,
+    Other.Benefits = Other.Benefits / 1000,
+    Total.Benefits = Total.Benefits / 1000,
+    Total.Compensation = Total.Compensation / 1000,
+    Hours = Hours / 10
+  )
+
+# Anonymize employee names by assigning unique IDs based on names. We have 260 repeat employees out of 13,554 initial observations.
+employee_comp <- employee_comp |>
+  group_by(Employee.Name) |>              # Group by Employee.Name
+  mutate(Employee.ID = cur_group_id()) |>     # assign IDs
+  ungroup() |>                             # Ungroup after assigning IDs
+  select(-Employee.Name) |>                   # Remove Employee Name column
+  filter(!duplicated(Employee.ID))
+```
+
+```{r}
+#unique(employee_comp$Employment.Type)
+```
+
+```{r}
+#creating Overtime.Status variable
+employee_comp <- employee_comp |>
+  mutate(
+    Overtime.Status = case_when(
+      Employment.Type %in% c("Permanent Exempt", "Temporary Exempt") ~ "NotEligible",
+      !Employment.Type %in% c("Permanent Exempt", "Temporary Exempt") & Overtime > 0 ~ "Overtime",
+      !Employment.Type %in% c("Permanent Exempt", "Temporary Exempt") & Overtime <= 0 ~ "NoOvertime"
+    )
+  )
+#transforming Retirement
+employee_comp$Retirement <- ifelse(employee_comp$Retirement > 0, "Benefits", "No Benefits")
+
+#transforming Employment.Type
+employee_comp <- employee_comp |>
+  mutate(
+    Employment.Type = ifelse(Employment.Type %in% c("Permanent Civil Service", "Permanent Exempt"), "Permanent", "NonPermanent")
+  )
+```
+
+### Exploratory Data Analysis
+
+```{r, echo = FALSE, fig.height=2.5, fig.width = 9.5}
+ 
+p_compensation <- ggplot(data = employee_comp, aes(x = `Total.Compensation`)) +
+  geom_histogram(bins = 20, fill = "steelblue", color = "black" ) +
+  labs(x = "Total Compensation (Thousands USD)",
+       y = "Count") +
+  geom_vline(xintercept = mean(employee_comp$`Total.Compensation`), color = "red", linetype = "solid", size = 1) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    plot.title = element_text(size = 10),     
+    axis.title = element_text(size = 8),      
+    axis.text = element_text(size = 8)
+  )
+ 
+p_salary <- ggplot(data = employee_comp, aes(x = `Salaries`)) +
+  geom_histogram(bins = 20, fill = "steelblue", color = "black") +
+  labs(x = "Total Salary (Thousands USD)",
+       y = "Count") +
+  geom_vline(xintercept = mean(employee_comp$`Salaries`), color = "red", linetype = "solid", size = 1) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    plot.title = element_text(size = 10),     
+    axis.title = element_text(size = 8),      
+    axis.text = element_text(size = 8)
+  )
+
+p_hours_h <- ggplot(data = employee_comp, aes(x = Hours)) +
+  geom_histogram(bins = 20, fill = "steelblue", color = "black" ) +
+  labs(x = "Hours (Tens of Hours)",
+       y = "Count") +
+  geom_vline(xintercept = mean(employee_comp$`Hours`), color = "red", linetype = "solid", size = 1) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    plot.title = element_text(size = 10),     
+    axis.title = element_text(size = 8),      
+    axis.text = element_text(size = 8)
+  )
+ 
+p123 <- (p_compensation + p_salary + p_hours_h) +
+  plot_annotation(title = "Distribution of Total Compensation, Total Salary, Hours",
+                  theme = theme(
+    plot.title = element_text(size = 10)
+  ))
+```
+
+```{r, echo=FALSE, fig.height=2, fig.width = 8}
+employee_comp$Retirement <- factor(employee_comp$Retirement, levels = c("No Benefits", "Benefits"))
+ 
+p_overtime <- ggplot(employee_comp, aes(x = Overtime.Status)) +
+  geom_bar(fill = "steelblue", color = "black", width = 0.25) +
+  labs(x = "Overtime Status",
+       y = "Count") +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 10),     
+    axis.title = element_text(size = 8),      
+    axis.text = element_text(size = 8)
+  )
+ 
+p_retirement <- ggplot(employee_comp, aes(x = Retirement)) +
+  geom_bar(fill = "steelblue", color = "black", width = 0.25) +
+  labs(x = "Retirement Status",
+       y = "Count") +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 10),     
+    axis.title = element_text(size = 8),      
+    axis.text = element_text(size = 8)
+  )
+ 
+p45 <- (p_overtime + p_retirement) +
+  plot_annotation(title = "Employee Overtime Retirement Benefits Status",
+                  theme = theme(
+    plot.title = element_text(size = 10)
+  ))
+```
+
+```{r, echo=FALSE, fig.height=2, fig.width = 8.5}
+department_employment_counts <- employee_comp |>
+  count(Department, Employment.Type) |>
+  arrange(desc(n))
+ 
+p6 <- ggplot(department_employment_counts, aes(x = n, y = reorder(Department, n), fill = Employment.Type)) +
+  geom_col(color = "black", width = 0.75) +
+  labs(
+    title = "Employee Distribution by Department and Employment Type",
+    x = "Count",
+    y = "Department",
+    fill = "Employment Type"
+  ) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.05))) +  
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 10),     
+    axis.title = element_text(size = 8),      
+    axis.text = element_text(size = 8),
+    legend.position = c(0.9, 0.35),
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 6)
+  )
+```
+
+```{r, echo=FALSE, fig.height=1.8, fig.width = 9}
+(p123) +
+  plot_annotation(
+    title = "Univariate EDA",
+    theme = theme(
+      plot.title = element_text(size = 12, face = "bold")
+    )
+  )
+```
+
+```{r, echo=FALSE, fig.height=4, fig.width = 9}
+(p45 / p6) +
+  plot_annotation(
+    theme = theme(
+      plot.title = element_text(size = 12, face = "bold")
+    )
+  )
+```
+
+The total compensation and wage charts show relatively symmetric and right-skewed distributions, indicating that most employees follow a normal distribution, with some employees having higher than average wages and salaries. The work hours chart is mostly flat except for two values with large counts that reflect considerable variation. Most employees work similar hours, and a few employees work more.
+
+The peak in total hours worked corresponds to employees working around 40 hours per week in one year (2080 hours). This is demonstrated by the red dashed line in the histogram at 2080, where 31.1% of employees are in a range close to this value (2000-2160 hours), suggesting compliance with full-time schedules.
+
+The overtime and retirement benefits charts show that most employees work overtime and receive retirement benefits. The employee department and employment type chart reveals that most employees work in the Municipal Transportation Agency and Public Utilities Commission departments, with the majority in permanent positions and a small fraction in non-permanent (temporary/fixed-term) positions.
+
+```{r}
+# Between compensation and hours
+p_compensation_hours = ggplot(employee_comp,
+       aes(x = Hours, y = Total.Compensation)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE) +
+  labs(title = "Hours and Compensation",
+       x = "Hours (tens of hours)",
+       y = "Compensation (thousands of dollars)") +
+  scale_y_continuous(labels = label_dollar(scale = 1)) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 10),     
+    axis.title = element_text(size = 8),      
+    axis.text = element_text(size = 8) 
+  )
+```
+
+```{r}
+# Between compensation and overtime
+p_compensation_overtime = ggplot(employee_comp,
+       aes(x = Overtime.Status, y = Total.Compensation)) +
+  geom_boxplot() +
+  labs(title = "Overtime Pay Status and Compensation",
+       x = "Overtime Pay Status",
+       y = "Compensation (thousands of dollars)") +
+  scale_y_continuous(labels = label_dollar(scale = 1)) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 8),     
+    axis.title = element_text(size = 8),      
+    axis.text = element_text(size = 6) 
+  )
+```
+
+```{r}
+# Between compensation and retirement
+p_compensation_retirement = ggplot(employee_comp,
+       aes(x = Retirement, y = Total.Compensation)) +
+  geom_boxplot() +
+  labs(title = "Retirement Benefits Status and Compensation",
+       x = "Retirement Benefits Status",
+       y = "Compensation (thousands of dollars)") +
+  scale_y_continuous(labels = label_dollar(scale = 1)) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 8),     
+    axis.title = element_text(size = 8),      
+    axis.text = element_text(size = 6) 
+  )
+```
+
+```{r}
+# Between compensation and employment type
+p_compensation_employment = ggplot(employee_comp,
+       aes(x = reorder(Employment.Type, Total.Compensation, FUN = median),
+           y = Total.Compensation)) +
+  geom_boxplot() +
+  labs(title = "Compensation by Employment Type (Sorted by Median)",
+       x = "Employment Type",
+       y = "Compensation (thousands of dollars)"
+       ) +
+  scale_y_continuous(labels = label_dollar(scale = 1)) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 6),
+  ) +
+  scale_x_discrete(labels = function(x) gsub(" ", "\n", x)) +
+  theme(
+    plot.title = element_text(size = 10),     
+    axis.title = element_text(size = 8),      
+    axis.text = element_text(size = 8) 
+  )
+```
+
+```{r}
+# Between compensation and job family
+p_compensation_job = ggplot(employee_comp,
+       aes(reorder(Job.Family, Total.Compensation, FUN = median),
+           y = Total.Compensation)) +
+  geom_boxplot() +
+  labs(title = "Compensation by Job Family (Sorted by Median)",
+       x = "Job Family",
+       y = "Compensation (thousands of dollars)") +
+  scale_y_continuous(labels = label_dollar(scale = 1)) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    plot.title = element_text(size = 10),     
+    axis.title = element_text(size = 8),      
+    axis.text = element_text(size = 8)
+  )
+```
+
+```{r}
+# Between compensation and department
+p_compensation_department = ggplot(employee_comp,
+       aes(x = reorder(Department, Total.Compensation, FUN = median),
+           y = Total.Compensation)) +
+  geom_boxplot() +
+  labs(title = "Compensation by Department (Sorted by Median)",
+       x = "Department",
+       y = "Compensation (thousands of dollars)"
+       ) +
+  scale_y_continuous(labels = label_dollar(scale = 1)) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 7),
+    plot.title = element_text(size = 10),     
+    axis.title = element_text(size = 8),      
+  ) +
+  scale_x_discrete(labels = function(x) gsub(" ", "\n", x))
+```
+
+```{r, fig.height=2.25, fig.width=9}
+p12 <- p_compensation_retirement + p_compensation_overtime
+p34 <- p_compensation_hours + p_compensation_department +
+  plot_layout(widths = c(3, 7))
+
+(p12) +
+  plot_annotation(
+    title = "Bivariate EDA",
+    theme = theme(
+      plot.title = element_text(size = 12, face = "bold")
+    )
+  )
+```
+
+```{r, fig.height=2.5, fig.width=9}
+
+(p34)
+```
+
+The retirement plot shows that employees with retirement benefits generally have higher compensation. In the overtime graph, employees with and without hourly pay have similar compensation, but those who are not eligible for overtime pay have much lower compensation and a higher RIQ. The work hours graph indicates a strong positive linear relationship between hours and compensation, suggesting that compensation increases with work hours. In the department graph, median compensations are close to \$200,000 in most departments except the Board of Appeals. However, the compensation differential (RIQ) varies across departments.
+
+\vspace{-0.9cm}
+
+```{r}
+# Plot 3: Salaries vs. Total Compensation by Overtime Status
+p3 <- ggplot(data = employee_comp,
+             aes(x = Salaries, y = Total.Compensation, color = Overtime.Status)) +
+  geom_smooth(method = "lm", se = FALSE) +
+  scale_color_brewer(palette = "Set1") +
+  labs(
+    x = "Salaries (Thousands USD)",
+    y = "Total Compensation (Thousands USD)",
+    title = "Salaries vs. Total Compensation by Overtime"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 12),
+    axis.title = element_text(size = 8),
+    axis.text = element_text(size = 8),
+    legend.position = "none" 
+  )
+
+# Plot 4: Hours vs Compensation by Overtime Status
+p4 <- ggplot(data = employee_comp,
+             aes(x = Hours, y = Total.Compensation, color = Overtime.Status)) +
+  geom_smooth(method = "lm", se = FALSE) +
+  scale_color_brewer(palette = "Set1") +
+  labs(
+    x = "Hours (Tens of Hours)",
+    y = "Total Compensation (Thousands USD)",
+    title = "Hours vs. Total Compensation by Overtime"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 12),
+    axis.title = element_text(size = 8),
+    axis.text = element_text(size = 8),
+    legend.position = "none" 
+  )
+
+```
+
+```{r, fig.height=2.8, fig.width=9}
+combined_plot2 <- p3 + p4 + 
+  plot_layout(guides = 'collect') & 
+  theme(legend.position = 'bottom') 
+
+final_plot <- combined_plot2 +
+  plot_annotation(
+    title = "Potential Interaction Effects",
+    theme = theme(
+      plot.title = element_text(
+        size = 12, face = "bold",
+      )
+    )
+  )
+
+final_plot
+```
+
+\vspace{-1cm}
+
+We will explore a possible interaction effect between Hours Worked and Overtime Status, as the slope of Hours Worked vs. Total Compensation appears to vary by Overtime Status. We will also explore a possible interaction effect between Overtime status and Normal Salaries Earned, as Normal Salary appears to have a stronger positive impact on Total Compensation for employees who work overtime than for those who do not.
+
+## Methodology
+
+\vspace{-0.25cm}
+
+### Choosing Modelling Strategy and Initial Variables
+
+\vspace{-0.25cm}
+
+Since our response variable, `Total.Compensation` is numerical, we will fit multiple linear regression models. From the EDA, `Salaries` is by far the strongest predictor of `Total.Compensation`, which is naturally expected since normal salaries make up the most of total compensation, with extra benefits and bonuses contributing less.
+
+To best analyze the effects of all the variables, we fit one MLR model with `Salaries` as a predictor, and one MLR model without `Salaries` as a predictor. Since our project motivations and research question center largely around overtime and hours worked, we also choose `Hours` and `Overtime.Status` as predictors in the model.
+
+\vspace{-0.25cm}
+
+### Variable Transformations
+
+\vspace{-0.25cm}
+
+To assess the constant variance condition between the quantitative variables `Salaries` and `Hours`, and `Total.Compensation` , we fit a linear regression model using just `Salaries` to predict `Total.Compensation`, and another linear regression model using just `Hours` to predict `Total.Compensation`. From the plot of residuals vs. fitted values for each model, we decided to construct our model using `log(Total.Compensation)`, `log(Hours)`, and `log(Salaries)`, to better satisfy the constant variance condition.
+
+\vspace{-0.2cm}
+
+```{r}
+hours_model = lm(Total.Compensation ~ Hours, data = employee_comp)
+aug_hours_model = augment(hours_model)
+
+epsilon <- aug_hours_model$.resid
+fitted <- aug_hours_model$.fitted
+hours_model_plot = ggplot(employee_comp, aes(x = fitted, y = epsilon)) + 
+  geom_point() + 
+  geom_abline(slope = 0, intercept = 0, color = "red", linetype = "dotted") +
+  labs(
+    x = "Fitted Values", 
+    y = "Residuals", 
+    title = "Hours predicting Total Compensation") +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(size = 8),     # Title text size
+    axis.title.x = element_text(size = 8),    # X-axis title text size
+    axis.title.y = element_text(size = 8),    # Y-axis title text size
+    axis.text = element_text(size = 6)        # Axis tick labels size
+  )
+
+```
+
+```{r}
+log_hours_model = lm(log(Total.Compensation) ~ log(Hours), data = employee_comp)
+aug_log_hours_model = augment(log_hours_model)
+
+epsilon1 <- aug_log_hours_model$.resid
+fitted1 <- aug_log_hours_model$.fitted
+transformed_hours_model_plot = ggplot(employee_comp, aes(x = fitted1, y = epsilon1)) + 
+  geom_point() + 
+  geom_abline(slope = 0, intercept = 0, color = "red", linetype = "dotted") +
+  labs(
+    x = "Fitted Values", 
+    y = "Residuals", 
+    title = "log(Hours) predicting log(Total Compensation)") +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(size = 8),     # Title text size
+    axis.title.x = element_text(size = 8),    # X-axis title text size
+    axis.title.y = element_text(size = 8),    # Y-axis title text size
+    axis.text = element_text(size = 6)        # Axis tick labels size
+  )
+```
+
+```{r, fig.height=2.4, fig.width=8}
+(hours_model_plot + transformed_hours_model_plot) +
+  plot_annotation(
+    title = "Variable Transformation for Hours",
+    theme = theme(
+      plot.title = element_text(size = 12, face = "bold"),
+    )
+  )
+```
+
+```{r}
+salary_model = lm(Total.Compensation ~ Salaries, data = employee_comp)
+aug_salary_model = augment(salary_model)
+
+epsilon2 <- aug_salary_model$.resid
+fitted2 <- aug_salary_model$.fitted
+
+salary_model_plot = ggplot(employee_comp, aes(x = fitted2, y = epsilon2)) + 
+  geom_point() + 
+  geom_abline(slope = 0, intercept = 0, color = "red", linetype = "dotted") +
+  labs(
+    x = "Fitted Values", 
+    y = "Residuals", 
+    title = "Salary predicting Total Compensation") +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(size = 8),     # Title text size
+    axis.title.x = element_text(size = 8),    # X-axis title text size
+    axis.title.y = element_text(size = 8),    # Y-axis title text size
+    axis.text = element_text(size = 6)        # Axis tick labels size
+  )
+```
+
+```{r}
+log_salary_model = lm(log(Total.Compensation) ~ log(Salaries), data = employee_comp) 
+aug_log_salary_model = augment(log_salary_model)
+
+epsilon3 <- aug_log_salary_model$.resid
+fitted3 <- aug_log_salary_model$.fitted
+
+log_salary_model_plot = ggplot(employee_comp, aes(x = fitted3, y = epsilon3)) + 
+  geom_point() + 
+  geom_abline(slope = 0, intercept = 0, color = "red", linetype = "dotted") +
+  labs(
+    x = "Fitted Values", 
+    y = "Residuals", 
+    title = "log(Salary) predicting log(Total Compensation)") +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(size = 8),    
+    axis.title.x = element_text(size = 8),  
+    axis.title.y = element_text(size = 8),   
+    axis.text = element_text(size = 6)      
+  )
+```
+
+```{r, fig.height=2.4, fig.width=8}
+(salary_model_plot + log_salary_model_plot) +
+  plot_annotation(
+    title = "Variable Transformation for Salaries",
+    theme = theme(
+      plot.title = element_text(size = 12, face = "bold"),
+    )
+  )
+```
+
+```{r}
+#Proceeding, we'll use log versions of these variables
+employee_comp <- employee_comp |>
+  mutate(Log.Total.Compensation = log(Total.Compensation)) |> 
+  mutate(Log.Hours = log(Hours)) |> 
+  mutate(Log.Salaries = log(Salaries))
+```
+
+\vspace{-1cm}
+
+### Interaction Effects
+
+We conducted nested F-Tests to explore potential interaction effects `Overtime.Status*Log.Hours` and `Overtime.Status*Log.Salaries`. The p-values for both F tests are well below our alpha level of 0.05, so we can conclude that both interaction terms are statistically significant, and should be added to the model \[See [Nested F-Test For Interaction Terms] for the outputs of the nested F tests\].
+
+### Final Model Selection: Nested F-Test and AIC
+
+\vspace{-0.4cm}
+
+To determine whether any of `Department`, `Retirement`, or `Employment.Type` should be included in the model, we first perform a nested F-test. Since the p-value is well below our alpha level of 0.05, we conclude that at least one of the coefficients associated with one of the variables, is not 0.
+
+```{r}
+reduced <- lm(Log.Total.Compensation ~ Log.Salaries + Log.Hours + Overtime.Status + Log.Salaries*Overtime.Status + Log.Hours*Overtime.Status, data = employee_comp)
+full <- lm(Log.Total.Compensation ~ Log.Salaries + Log.Hours + Overtime.Status + Department + Retirement + Employment.Type + Log.Salaries*Overtime.Status + Log.Salaries*Hours, data = employee_comp)
+
+kable(anova(reduced, full), format = "markdown", digits = 3) |>
+  kableExtra::kable_styling("striped") |>
+  kableExtra::kable_styling(font_size = 8)
+```
+
+\vspace{-0.4cm}
+
+We proceed the variable selection process by calculating the AIC for a model with predictors `Log.Salaries`, `Log.Hours`, `Overtime.Status`, `Log.Salaries*Overtime.Status`*,* and `Log.Salaries*Hours`, with every different combination of `Department`, `Retirement`, and/or `Employment.Type`. We use AIC instead of BIC because we do not wish to impose a harsher penalty for models with more terms, based on our motivation to explain Total Compensation for employees in SF. The model with the lowest AIC (-14133.21) includes all of `Department`, `Retirement`, and `Employment.Type` , in addition to the variables we have already selected. \[See [AIC Analysis] for all AIC calculations\]
+
+\vspace{-0.4cm}
+
+### Final Model Selection: Model Diagnostics and Model Conditions
+
+**Final Model 1: With log(Salaries) as a predictor**
+
+Fitting a model that included interaction terms increased multicollinearity without improving the adjusted R squared value \[see [Testing Model 1 + interaction terms](#testing-model-1-interaction-terms)\]. To precisely interpret the coefficients, it was decided not to include the interaction terms to address the multicollinearity issue. For Final Model 1, we will fit a main effects model predicting `Log.Total.Compensation` using `Log.Salaries`, `Log.Hours`, `Overtime.Status`, `Retirement` , `Employment.Type`, and `Department`.
+
+```{r}
+final_model_1 <- lm(Log.Total.Compensation ~ Log.Salaries + Log.Hours + Overtime.Status + Retirement + Employment.Type + Department, data = employee_comp)
+```
+
+[Model Conditions]{.underline}
+
+The constant variance condition could be improved, but the normality condition is satisfied.
+
+```{r}
+epsilon <- residuals(final_model_1)
+
+normality1 = ggplot(employee_comp, aes(x = epsilon)) +
+  geom_histogram(binwidth = 0.05) +
+  labs(x = "Residuals", y = "Frequency",
+       title = "Histogram of Residuals") +
+theme_minimal() + 
+  theme(
+    plot.title = element_text(size = 10),    
+    axis.title.x = element_text(size = 8),  
+    axis.title.y = element_text(size = 8),   
+    axis.text = element_text(size = 6)
+  )
+```
+
+```{r}
+final_epsilon_1 <- augment(final_model_1)$.resid
+final_fitted_1 <- augment(final_model_1)$.fitted
+
+variance1 = ggplot(employee_comp, aes(x = final_fitted_1, y = final_epsilon_1)) + 
+  geom_point() + 
+  geom_abline(slope = 0, intercept = 0, color = "red", linetype = "dotted") +
+  labs(
+    x = "Fitted Values", 
+    y = "Residuals (Thousands of USD)", 
+    title = "Fitted Values vs. Residuals") +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(size = 10),    
+    axis.title.x = element_text(size = 8),  
+    axis.title.y = element_text(size = 8),   
+    axis.text = element_text(size = 6)
+  )
+```
+
+```{r, fig.height=2.2, fig.width=8}
+(normality1 + variance1) +
+  plot_annotation(
+    theme = theme(
+      plot.margin = margin(b = 0)
+    )
+  )
+```
+
+[Model Diagnostics]{.underline}
+
+The model with Log(Salaries) shows some multicollinearity between Log(Salaries) and Log(Hours), with VIF values of 9.263 and 9.335, respectively—high but below the threshold of 10. This likely stems from fixed hourly wages and linear dependence in compensation packages driven by salary. Cook's distance values are all well below 0.5, indicating no influential outliers or high-leverage points \[see [Model Diagnostics: Final Model 1]\].
+
+**Final Model 2: Without log(Salaries) as a predictor**
+
+Similarly to Final Model 1, fitting a model including interaction terms introduced high multicollinearity, while not improving the adjusted R Squared value \[see [Testing Model 2 + interaction terms](#testing-model-2-interaction-terms)\], so it was decided not to include interaction terms. For Final Model 2, we will fit a main effects model predicting `Log.Total.Compensation` using `Log.Hours`, `Overtime.Status`, `Retirement` , `Employment.Type`, and `Department`.
+
+```{r}
+final_model_2 <- lm(Log.Total.Compensation ~ Log.Hours + Overtime.Status + Retirement + Employment.Type + Department, data = employee_comp)
+```
+
+[Model Conditions]{.underline}
+
+The normality and constant variance conditions are satisfied for this model.
+
+```{r}
+epsilon <- residuals(final_model_2)
+
+normality2 = ggplot(employee_comp, aes(x = epsilon)) +
+  geom_histogram(binwidth = 0.05) +
+  labs(x = "Residuals", y = "Frequency",
+       title = "Histogram of Residuals") +
+theme_minimal() + 
+  theme(
+    plot.title = element_text(size = 10),    
+    axis.title.x = element_text(size = 8),  
+    axis.title.y = element_text(size = 8),   
+    axis.text = element_text(size = 6)
+  )
+```
+
+```{r}
+final_epsilon_2 <- augment(final_model_2)$.resid
+final_fitted_2 <- augment(final_model_2)$.fitted
+
+variance2 = ggplot(employee_comp, aes(x = final_fitted_2, y = final_epsilon_2)) + 
+  geom_point() + 
+  geom_abline(slope = 0, intercept = 0, color = "red", linetype = "dotted") +
+  labs(
+    x = "Fitted Values", 
+    y = "Residuals (Thousands of USD)", 
+    title = "Fitted Values vs. Residuals") +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(size = 10),    
+    axis.title.x = element_text(size = 8),  
+    axis.title.y = element_text(size = 8),   
+    axis.text = element_text(size = 6)
+  )
+```
+
+```{r, fig.height=2.2, fig.width=8}
+normality2 + variance2
+```
+
+[Model Diagnostics]{.underline}
+
+All the VIFs of the model are well below 10, indicating no issue with multicollinearity. The Cook's Distance values for all observations are well below 0.5, indicating no observations with large leverage. \[see [Model Diagnostics: Final Model 2] \].
+
+## Results
+
+### Final Model with Log(Salaries) as a predictor:
+
+```{r}
+tidy(final_model_1) |> 
+  kable(digits = 3)
+```
+
+```{r}
+#summary1 = summary(final_model_1)
+#summary1$adj.r.squared
+```
+
+The Adjusted R² of 0.976 indicates the model explains 97.6% of the variability in log(Total Compensation). However, high VIF values for predictors like Log(Salaries) and Log(Hours) suggest multicollinearity, limiting the model's statistical reliability. We aim to address this issue in the second model.
+
+**Interpreting Results**
+
+[Salaries:]{.underline} A 10% raise in salary (in thousands USD) corresponds to a 9.1% expected increase in compensation, holding all else constant. The nearly identical factor indicates that salary is the most correlated factor in determining compensation.
+
+[Hours:]{.underline} When the working hours (in 10s of hours) of an employee double, it is expected that their compensation will increase by 2.0%, holding all else constant.
+
+[Overtime:]{.underline} Employees ineligible for overtime are expected to earn 0.79% less than those eligible but not working overtime, while those working overtime are expected to earn 13.4% more than those eligible but not working overtime, holding all else constant.
+
+[Retirement Benefits:]{.underline} Receiving retirement benefits is expected to increase an employee's compensation by 40.9%, holding all else constant, indicating that it may be a major component of the employee compensation package.
+
+[Employment Type:]{.underline} Permanent employees are expected to earn 2.6% more than temporary or fixed-term employees, holding all else constant.
+
+[Department:]{.underline} Compensation varies by department, with employees from the most compensated department, the Municipal Transportation Agency, expected to earn 9.1% more than those in the least compensanted department, the Board of Appeals.
+
+\vspace{-0.15cm}
+
+### Final Model 2: Model without Log(Salaries) as a predictor:
+
+\vspace{-0.1cm}
+
+```{r}
+
+tidy(final_model_2) |>
+  kable(digits = 3)
+
+```
+
+\vspace{-0.2cm}
+
+```{r}
+#summary2 = summary(final_model_2)
+#summary2$adj.r.squared
+```
+
+The Adjusted R² of 0.889 is lower than the previous model but still explains most of the variability in log(Total Compensation). Residual plots show better distribution, and VIF values (all \<4) confirm multicollinearity is resolved ([Model Diagnostics: Final Model 2]). This indicates salary adds limited explanatory power relative to its contribution to VIF.
+
+**Interpreting Results**
+
+[Hours:]{.underline} When the working hours (in 10s of hours) of an employee double, it is expected that their compensation (thousands of USD) will double, holding all else constant. This approximately identical factor indicates that working hours is the most correlated factor in determining compensation.
+
+[Overtime:]{.underline} Employees ineligible for overtime are expected to earn 0.4% more than those eligible but not working overtime, while those working overtime are expected to earn 17% less than those eligible but not working overtime, holding all else constant.
+
+[Retirement Benefits:]{.underline} Employees receiving retirement benefits are expected to earn 44.6% more than those who do not, holding all else constant.
+
+[Employment Type:]{.underline} Permanent employees are expected to earn 49.3% more in total compensation than temporary, holding all else constant.
+
+[Department:]{.underline} The Municipal Transportation Agency has the lowest expected compensation, while the Board of Appeals has the highest, holding all else constant.
+
+\vspace{-0.2cm}
+
+## Discussion + Conclusion
+
+To answer our research question, the most significant factor that is expected to increase an employee's total compensation is retirement benefits. From both of our models, receiving retirement benefits is expected to significantly increase total compensation by about 40%. Permanent employees are expected to make more than temporary employees, and working more hours is expected to result in making more money. Model 1 predicts a smaller impact of these factors on total compensation, while Model 2 predicts a much greater impact.
+
+From our models, working overtime is not expected to lead to extreme increases in total compensation, which suggests that employees making hundreds of thousands of dollars in overtime are likely not represenative of the total population. However, more analysis is necessary before we can draw conclusions about the specific impacts of working overtime on total compensation. From Model 1, employees who work overtime are expected to earn about 14% more than employees who do not, while from Model 2, employees who work overtime are expected to earn about 17% less than employees who do not.
+
+More analysis is also necessary before we can draw conclusions about the impact of department on total compensation. From Model 1, it is expected that the Municipal Transportation Agency is the most highly compensated, and the Board of Appeals is the least compensated. This is in direct contrast to the results from Model 2, likely due to the high multicollinearity in Model 1, which causes high variability in model coefficients.
+
+Generally speaking, most quantitative predictors were positively correlated with total salary, and most categorical predictors contextually related to total compensation as expected (ex: retirement benefits were indicative of higher average total compensations). Even though log(Salaries) is the most significant predictor for total compensation, the inclusion of base salaries introduced multicollinearity, likely because it is a large component of compensation. This redundancy inflates variance in coefficient estimates, as seen in the residual plots.
+
+The dataset reflects real-world constraints in data sampling. While the it provided some predictors, it lacked more critical information (ex: education, demographics, etc) that likely influence compensation. Because of these omissions in the data, we had to use available data and rigorously compare models to identify the most reliable. Our report shows while perfect data is rarely available, rigorous statistical methods can still yield valuable insights. Future research could explore further data sampling to incorporate additional predictors to better capture nuances in employment. Even within its limitations, this analysis provides a solid understanding the some drivers (hours, employment type, overtime status, retirement, and department) of public employee compensation in San Francisco.
+
+\newpage
+
+# Appendix
+
+## Additional EDA
+
+```{r, fig.height=2, fig.width=4}
+p_compensation_employment
+```
+
+We observe that compensation levels vary across different employment types, suggesting an uneven distribution of compensation. The median compensation is higher for permanent compared to non permanent employment types.
+
+```{r, fig.height=3.5, fig.width=9}
+# ggpairs plot
+employee_comp_numeric <- employee_comp |>
+  select(
+    Total.Compensation,
+    Department,
+    Employment.Type,
+    Hours,
+    Salaries,
+    Retirement,
+    Overtime.Status
+  ) |>
+  na.omit()  # Remove rows with NA values
+
+employee_comp_numeric <- employee_comp_numeric |>
+  select_if(~ n_distinct(.) > 1)
+
+ggpairs(
+  data = employee_comp_numeric,
+  columns = c("Total.Compensation", "Hours", "Salaries", "Employment.Type", "Overtime.Status"),
+  mapping = aes(alpha = 0.6)
+)
+```
+
+\newpage
+
+**More Interaction Effects**
+
+```{r}
+# Plot 1: Hours vs. Total Compensation by Department
+p1 <- ggplot(data = employee_comp,
+             aes(x = Hours, y = Total.Compensation, color = Department)) +
+  geom_smooth(method = "lm", se = FALSE) +
+  scale_color_brewer(palette = "Set1") +
+  labs(
+    x = "Hours Worked (tens of hours)",
+    y = "Total Compensation (Thousands USD)",
+    title = "Hours vs. Compensation by Department",
+    color = "Department"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 12),
+    axis.title = element_text(size = 8),
+    axis.text = element_text(size = 8)
+  )
+
+# Plot 2: Salaries vs. Total Compensation by Department
+p2 <- ggplot(data = employee_comp,
+             aes(x = Salaries, y = Total.Compensation, color = Department)) +
+  geom_smooth(method = "lm", se = FALSE) +
+  scale_color_brewer(palette = "Set1") +
+  labs(
+    x = "Normal Salaries",
+    y = "Total Compensation (Thousands USD)",
+    title = "Salaries vs. Total Compensation by Department"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 12),
+    axis.title = element_text(size = 8),
+    axis.text = element_text(size = 8),
+    legend.position = "none"  
+  )
+```
+
+```{r, fig.height=5, fig.width=9}
+combined_plot1 <- p1 + p2 + 
+  plot_layout(guides = 'collect') & 
+  theme(legend.position = 'bottom') 
+
+combined_plot1
+```
+
+## Nested F-Test For Interaction Terms
+
+[Nested F Test for `Overtime.Status*Log.Hours`]{.underline}
+
+```{r}
+reduced <- lm(Log.Total.Compensation ~ Log.Salaries + Log.Hours + Overtime.Status, data = employee_comp)
+full <- lm(Log.Total.Compensation ~ Log.Salaries + Log.Hours + Overtime.Status + Log.Hours*Overtime.Status, data = employee_comp)
+kable(anova(reduced, full), format = "markdown", digits = 3)
+```
+
+[Nested F Test for `Overtime.Status*Log.Salaries`]{.underline}
+
+```{r}
+reduced <- lm(Log.Total.Compensation ~ Log.Salaries + Log.Hours + Overtime.Status, data = employee_comp)
+full <- lm(Log.Total.Compensation ~ Log.Salaries + Log.Hours + Overtime.Status + Log.Salaries*Overtime.Status, data = employee_comp)
+kable(anova(reduced, full), format = "markdown", digits = 3)
+```
+
+\newpage
+
+## AIC Analysis
+
+AIC for model with none of the new variables:
+
+```{r}
+#add none of the new variables
+model1 <- lm(Log.Total.Compensation ~ Log.Salaries + Log.Hours + Overtime.Status + Log.Salaries*Overtime.Status + Log.Hours*Overtime.Status, data = employee_comp)
+glance(model1) |> select(AIC)
+```
+
+AIC for model with Department added:
+
+```{r}
+#add Department only 
+model2 <- lm(Log.Total.Compensation ~ Log.Salaries + Log.Hours + Overtime.Status + Log.Salaries*Overtime.Status + Log.Hours*Overtime.Status + Department, data = employee_comp)
+glance(model2) |> select(AIC, BIC)
+```
+
+AIC for model with Retirement added:
+
+```{r}
+#add Retirement only
+model3 <- lm(Log.Total.Compensation ~ Log.Salaries + Log.Hours + Overtime.Status + Log.Salaries*Overtime.Status + Log.Hours*Overtime.Status + Retirement, data = employee_comp)
+glance(model3) |> select(AIC, BIC)
+```
+
+AIC for model with Employment Type added:
+
+```{r}
+#add Employment Type only 
+model4 <- lm(Log.Total.Compensation ~ Log.Salaries + Log.Hours + Overtime.Status + Log.Salaries*Overtime.Status + Log.Hours*Overtime.Status + Employment.Type, data = employee_comp)
+glance(model4) |> select(AIC, BIC)
+```
+
+AIC for model with Retirement, Employment Type, and Department added:
+
+```{r}
+#add Retirement, Employment Type, Department 
+#lowest VIF.
+model5 <- lm(Log.Total.Compensation ~ Log.Salaries + Log.Hours + Overtime.Status + Log.Salaries*Overtime.Status + Log.Hours*Overtime.Status + Retirement + Employment.Type + Department, data = employee_comp)
+glance(model5) |> select(AIC, BIC)
+```
+
+AIC for Retirement and Department added:
+
+```{r}
+#add Retirement and Department
+model6 <- lm(Log.Total.Compensation ~ Log.Salaries + Log.Hours + Overtime.Status + Log.Salaries*Overtime.Status + Log.Hours*Overtime.Status + Retirement +  Department, data = employee_comp)
+glance(model6) |> select(AIC, BIC)
+```
+
+AIC for Retirement and Employment Type added:
+
+```{r}
+#add Retirement and Employment.Type
+model7 <- lm(Log.Total.Compensation ~ Log.Salaries + Log.Hours + Overtime.Status + Log.Salaries*Overtime.Status + Log.Hours*Overtime.Status + Retirement +  Employment.Type, data = employee_comp)
+glance(model7) |> select(AIC, BIC)
+```
+
+AIC for Department and Employment Type added:
+
+```{r}
+#add Department and Employment.Type
+model8 <- lm(Log.Total.Compensation ~ Log.Salaries + Log.Hours + Overtime.Status + Log.Salaries*Overtime.Status + Log.Hours*Overtime.Status + Department +  Employment.Type, data = employee_comp)
+glance(model8) |> select(AIC, BIC)
+```
+
+\newpage
+
+## Testing Model 1 + interaction terms {#testing-model-1-interaction-terms}
+
+**Model Output** **when including**
+
+`Log.Salaries*Overtime.Status` **and** `Log.Hours*Overtime.Status`.
+
+```{r}
+final_model1_interaction <- lm(Log.Total.Compensation ~ Log.Hours + Overtime.Status + Log.Salaries*Overtime.Status + Log.Hours*Overtime.Status + Retirement + Employment.Type + Department, data = employee_comp)
+tidy(final_model_2) |> kable(digits=3)
+```
+
+**VIF**
+
+Notice very high VIF for Hours, Overtime, Salaries, and all interaction terms.
+
+```{r}
+kable(vif(final_model1_interaction))
+```
+
+**Adjusted R Squared**
+
+```{r}
+summary(final_model1_interaction)$adj.r.squared
+```
+
+\newpage
+
+## Testing Model 2 + interaction terms {#testing-model-2-interaction-terms}
+
+**Model Output when including** `Log.Hours*Overtime.Status`
+
+```{r}
+final_model2_interaction <- lm(Log.Total.Compensation ~ Log.Hours + Overtime.Status + Log.Hours*Overtime.Status + Retirement + Employment.Type + Department, data = employee_comp)
+tidy(final_model_2) |> kable(digits=3)
+```
+
+**VIF**
+
+Notice very high VIF for the Overtime variable, and the interaction terms.
+
+```{r}
+kable(vif(final_model2_interaction))
+```
+
+**Adjusted R Squared**
+
+```{r}
+summary(final_model2_interaction)$adj.r.squared
+```
+
+## Model Diagnostics: Final Model 1
+
+```{r}
+kable(vif(final_model_1), digits = 3, col.names = c("Variable", "VIF"))
+```
+
+**Cook's Distance**
+
+```{r}
+aug_model_1 <- augment(final_model_1)
+
+
+n1 <- nrow(employee_comp)
+k1 <- length(coef(final_model_1)) - 1
+cooks_threshold_1 <- 4 / (n1 - k1 - 1)
+
+ggplot(aug_model_1, aes(x = seq_along(.cooksd), y = .cooksd)) +
+  geom_point(color = "darkblue") +
+  geom_hline(yintercept = cooks_threshold_1, linetype = "dashed", color = "red") +
+  labs(
+    x = "Index",
+    y = "Cook's Distance",
+    title = "Cook's Distance (Model with Log(Salaries))"
+  ) +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(size = 10),    
+    axis.title.x = element_text(size = 8),  
+    axis.title.y = element_text(size = 8),   
+    axis.text = element_text(size = 6)
+  )
+```
+
+The Cook's distance plot reveals no particular influential points, with the highest values reaching approximately 0.12. The majority of observations have Cook's distance values well below 0.05, clustering near zero. A few notable spikes appear at different indices, particularly around indices 0-2500, indicating some potentially influential observations in the early part of the dataset. However, none of these points exceed the traditional threshold of 1.0 for high influence, suggesting that while there are some moderately influential points, none are severely impacting the model estimates. Noting that Cook's distance measure both point leverage and how well the observation fits the general trend of the data, we can say the observations adhere to the model's trend well.
+
+## Model Diagnostics: Final Model 2
+
+**VIF**
+
+```{r}
+kable(vif(final_model_2), digits = 3, col.names = c("Variable", "VIF"))
+```
+
+**Cook's Distance**
+
+```{r}
+aug_model_2 <- augment(final_model_2)
+
+n2 <- nrow(employee_comp)
+k2 <- length(coef(final_model_2)) - 1
+cooks_threshold_2 <- 4 / (n2 - k2 - 1)
+
+ggplot(aug_model_2, aes(x = seq_along(.cooksd), y = .cooksd)) +
+  geom_point(color = "darkblue") +
+  geom_hline(yintercept = cooks_threshold_2, linetype = "dashed", color = "red") +
+  labs(
+    x = "Index",
+    y = "Cook's Distance",
+    title = "Cook's Distance (Model without Log(Salaries))"
+  ) +
+  theme_minimal()
+```
+
+\newpage
+
+## Multicollinearity
+
+```{r}
+# VIF
+# Compensation as the response variable
+model <- lm(Total.Compensation ~ ., data = employee_comp_numeric)
+
+vif_df <- as.data.frame(vif(model)) |>
+  rownames_to_column(var = "Variable") |>
+  arrange(desc(vif(model)))
+
+kable(vif_df, digits = 3, col.names = c("Variable", "VIF"))
+```
+
+Based on a model with no interaction terms, there does not seem to be evidence of multicollinearity among the variables. The Variance Inflation Factor (VIF) values of all variables are below the threshold of 10.
+
+\newpage
+
+## References
