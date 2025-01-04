@@ -1,5 +1,5 @@
 # Explaining Factors Contributing to Total Compensation for San Francisco City Employees
-For a full version of the report, including data cleaning deatils, EDA, variable selection, variable transformation, and more, see [written-report.pdf](https://github.com/kelly-h-xu/compensation-analysis/blob/a186f74c5a27c9a24e071de1fab4169118363ddf/written-report.pdf). 
+For a full version of the report, including data cleaning deatils, EDA, variable selection, variable transformation, and more, see [written-report.pdf](https://github.com/kelly-h-xu/compensation-analysis/blob/762a52c8b9f237682b07304aa26ddfc6fde5195d/written-report.pdf). 
 
 
 Written in collaboration with: Mason Wu, Matias Pinto-Chavez, Suhas Kurapati. 
