@@ -10,7 +10,15 @@ San Francisco is the United States city with the highest median household income
 With the rising scrutiny over high compensation figures, our analysis aims to provide insight into the impacts of different factors on Total Compensation in San Francisco, to 1) support decisions about budget allocations, overtime policies, and resource management to ensure fair and sustainable compensation practices, and 2) to help job seekers make informed decisions about employment opportunities and better assess their potential earnings.
 
 ## Data
-<img width="697" alt="image" src="https://github.com/user-attachments/assets/c56b57d2-f0b2-4b45-a7ed-788a9871f316" />
+| Variable Name        | Description                                                                                                                                                       | Datatype |
+|----------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------|
+| Total.Compensation   | The sum of all benefits & salaries paid to an employee, in thousands of USD.                                                                                      | Number   |
+| Salaries             | Normal salaries paid to the employee (not including overtime pay, bonuses, etc.) in thousands of USD.                                                             | Number   |
+| Hours                | The number of hours worked by the employee, in tens of hours.                                                                                                     | Number   |
+| Employment.Type      | Indicator for employment type: Permanent (ongoing) or NonPermanent (fixed-term/temporary).                                                                        | Text     |
+| Overtime.Status      | 3 levels: NotEligible, Overtime (Eligible for overtime pay, and received >0 USD in overtime pay), and NoOvertime (eligible for overtime pay but did not receive overtime pay). | Text     |
+| Retirement           | Indicator for whether an employee receives retirement benefits. 2 levels, Benefits and No Benefits                                                                | Text     |
+
 
 ## Methodology
 We fit two multiple linear regression models:
