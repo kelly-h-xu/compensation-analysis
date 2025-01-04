@@ -36,10 +36,10 @@ We fit two multiple linear regression models:
 ## Results
 ### Model Outputs
 #### Model 1
-<img width="627" alt="image" src="https://github.com/user-attachments/assets/16566582-8b34-4bd2-8174-20e97a02d7dd" />
+<img width="622" alt="image" src="https://github.com/user-attachments/assets/700fda50-2627-45d2-bfd9-5a9f0ecd0d12" />
 
 #### Model 2
-<img width="615" alt="image" src="https://github.com/user-attachments/assets/855c1957-d8d1-45a3-9803-1d6306dce739" />
+<img width="574" alt="image" src="https://github.com/user-attachments/assets/e9d1329d-12d1-4e20-a55b-02eb78d1c7d0" />
 
 The most significant factor that is expected to increase an employee's total compensation is retirement benefits. According to both of our models, receiving retirement benefits is expected to significantly increase total compensation by about 40%. Permanent employees are expected to make more than temporary employees, and working more hours is expected to result in a higher total compensation. Model 1 predicts a smaller impact of these factors on total compensation, while Model 2 predicts a much greater impact.
 
